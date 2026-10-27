@@ -4,7 +4,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64;
 use bitcoin::hashes::Hash;
@@ -545,6 +545,19 @@ impl Daemon {
         parse_hash(&self.request("getbestblockhash", json!([]))?)
     }
 
+    pub fn getblockhash(&self, height: usize) -> Result<BlockHash> {
+        parse_hash(&self.request("getblockhash", json!([height]))?)
+    }
+
+    pub fn getblockheight(&self, blockhash: &BlockHash) -> Result<usize> {
+        let info: Value = self.request("getblockheader", json!([blockhash.to_string()]))?;
+        Ok(info
+            .get("height")
+            .expect("missing height")
+            .as_u64()
+            .expect("non-numeric height") as usize)
+    }
+
     pub fn getblockheader(&self, blockhash: &BlockHash) -> Result<BlockHeader> {
         header_from_value(self.request(
             "getblockheader",
@@ -711,12 +724,7 @@ impl Daemon {
     }
 
     fn get_all_headers(&self, tip: &BlockHash) -> Result<Vec<BlockHeader>> {
-        let info: Value = self.request("getblockheader", json!([tip.to_string()]))?;
-        let tip_height = info
-            .get("height")
-            .expect("missing height")
-            .as_u64()
-            .expect("non-numeric height") as usize;
+        let tip_height = self.getblockheight(tip)?;
         let all_heights: Vec<usize> = (0..=tip_height).collect();
         let chunk_size = 100_000;
         let mut result = vec![];
@@ -741,6 +749,7 @@ impl Daemon {
         &self,
         indexed_headers: &HeaderList,
         bestblockhash: &BlockHash,
+        max_index_height: Option<usize>,
     ) -> Result<Vec<BlockHeader>> {
         // Iterate back over headers until known blockash is found:
         if indexed_headers.is_empty() {
@@ -752,11 +761,26 @@ impl Daemon {
             indexed_headers.len(),
             bestblockhash,
         );
+        if max_index_height.is_some() {
+            if let Some(headers) =
+                self.try_get_new_headers_by_height(indexed_headers, bestblockhash)?
+            {
+                return Ok(headers);
+            }
+        }
         let mut new_headers = vec![];
         let null_hash = BlockHash::all_zeros();
         let mut blockhash = *bestblockhash;
+        let started_at = Instant::now();
+        let mut last_progress_at = started_at;
         while blockhash != null_hash {
             if indexed_headers.header_by_blockhash(&blockhash).is_some() {
+                debug!(
+                    "found known block header {} after downloading {} new headers in {:?}",
+                    blockhash,
+                    new_headers.len(),
+                    started_at.elapsed()
+                );
                 break;
             }
             let header = self
@@ -764,10 +788,100 @@ impl Daemon {
                 .chain_err(|| format!("failed to get {} header", blockhash))?;
             blockhash = header.prev_blockhash;
             new_headers.push(header);
+            let should_log_progress = new_headers.len() % 1_000 == 0
+                || last_progress_at.elapsed() >= Duration::from_secs(30);
+            if should_log_progress {
+                debug!(
+                    "downloaded {} new block headers by backward walk, current prev hash {}, elapsed {:?}",
+                    new_headers.len(),
+                    blockhash,
+                    started_at.elapsed()
+                );
+                last_progress_at = Instant::now();
+            }
         }
-        trace!("downloaded {} block headers", new_headers.len());
+        debug!(
+            "downloaded {} block headers by backward walk in {:?}",
+            new_headers.len(),
+            started_at.elapsed()
+        );
         new_headers.reverse(); // so the tip is the last vector entry
         Ok(new_headers)
+    }
+
+    fn try_get_new_headers_by_height(
+        &self,
+        indexed_headers: &HeaderList,
+        bestblockhash: &BlockHash,
+    ) -> Result<Option<Vec<BlockHeader>>> {
+        let indexed_tip_height = indexed_headers.len() - 1;
+        let best_height = self.getblockheight(bestblockhash)?;
+
+        if best_height <= indexed_tip_height {
+            debug!(
+                "max-index-height batch header sync skipped: target height {} is not ahead of indexed height {}",
+                best_height, indexed_tip_height
+            );
+            return Ok(None);
+        }
+
+        let indexed_tip = indexed_headers.tip();
+        let daemon_hash_at_indexed_tip = self.getblockhash(indexed_tip_height)?;
+        if indexed_tip != &daemon_hash_at_indexed_tip {
+            debug!(
+                "max-index-height batch header sync skipped: indexed tip {} at height {} does not match daemon active chain {}; falling back to backward walk",
+                indexed_tip, indexed_tip_height, daemon_hash_at_indexed_tip
+            );
+            return Ok(None);
+        }
+
+        debug!(
+            "using max-index-height batch header sync from height {} to {}",
+            indexed_tip_height + 1,
+            best_height
+        );
+        let heights: Vec<usize> = ((indexed_tip_height + 1)..=best_height).collect();
+        let chunk_size = 100_000;
+        let mut result = vec![];
+        let started_at = Instant::now();
+        for heights in heights.chunks(chunk_size) {
+            trace!("downloading {} new block headers", heights.len());
+            let mut headers = self.getblockheaders(heights)?;
+            if headers.len() != heights.len() {
+                bail!(
+                    "expected {} headers from daemon, got {}",
+                    heights.len(),
+                    headers.len()
+                );
+            }
+            result.append(&mut headers);
+        }
+
+        let mut prev_hash = *indexed_tip;
+        for header in &result {
+            if header.prev_blockhash != prev_hash {
+                debug!(
+                    "max-index-height batch header sync skipped: downloaded headers are not connected at {}; falling back to backward walk",
+                    header.block_hash()
+                );
+                return Ok(None);
+            }
+            prev_hash = header.block_hash();
+        }
+        if prev_hash != *bestblockhash {
+            debug!(
+                "max-index-height batch header sync skipped: downloaded tip {} does not match expected {}; falling back to backward walk",
+                prev_hash, bestblockhash
+            );
+            return Ok(None);
+        }
+
+        debug!(
+            "downloaded {} block headers by max-index-height batch sync in {:?}",
+            result.len(),
+            started_at.elapsed()
+        );
+        Ok(Some(result))
     }
 
     pub fn get_relayfee(&self) -> Result<f64> {

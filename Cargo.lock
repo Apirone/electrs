@@ -839,6 +839,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
+name = "litecoin"
+version = "0.32.8-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc68e0c96b1991f1595cb531029829ece409dc806da91e5a4336d777f411691c"
+dependencies = [
+ "base58ck",
+ "bech32",
+ "bitcoin-internals",
+ "bitcoin-io",
+ "bitcoin_hashes",
+ "hex-conservative",
+ "hex_lit",
+ "litecoin-units",
+ "secp256k1",
+ "serde",
+]
+
+[[package]]
+name = "litecoin-units"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1adecce1b7a05efeec7d70aece0f8bece80250cef49814d01831ac371c6b6e2e"
+dependencies = [
+ "bitcoin-internals",
+ "serde",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -890,10 +918,11 @@ dependencies = [
 
 [[package]]
 name = "mempool-electrs"
-version = "3.4.0-dev"
+version = "3.4.0"
 dependencies = [
  "arrayref",
  "base64",
+ "bech32",
  "bincode",
  "bitcoin",
  "bounded-vec-deque",
@@ -910,6 +939,7 @@ dependencies = [
  "itertools",
  "lazy_static",
  "libc",
+ "litecoin",
  "log",
  "num_cpus",
  "page_size",
@@ -1404,22 +1434,32 @@ dependencies = [
 
 [[package]]
 name = "serde"
-version = "1.0.136"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce31e24b01e1e524df96f1c2fdd054405f8d7376249a5110886fb4b658484789"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+dependencies = [
+ "serde_core",
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_core"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.136"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08597e7152fcd306f41838ed3e37be9eaeed2b61c42e2117266a554fab4662f9"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 1.0.91",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1532,6 +1572,17 @@ name = "syn"
 version = "2.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ede7c438028d4436d71104916910f5bb611972c5cfd7f89b8300a8186e6fada6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -6,3 +6,5 @@ target
 *.pyc
 .vscode
 *.core
+.idea
+data_db

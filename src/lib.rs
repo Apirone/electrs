@@ -1,5 +1,13 @@
 #![recursion_limit = "1024"]
 
+#[cfg(all(feature = "litecoin", feature = "liquid"))]
+compile_error!("features `litecoin` and `liquid` are mutually exclusive");
+
+#[cfg(any(not(feature = "litecoin"), feature = "liquid"))]
+extern crate bitcoin_dep as bitcoin;
+#[cfg(all(feature = "litecoin", not(feature = "liquid")))]
+extern crate litecoin as bitcoin;
+
 extern crate rocksdb;
 
 #[macro_use]
