@@ -1,3 +1,4 @@
+#[cfg(any(not(feature = "litecoin"), feature = "liquid"))]
 use std::str::FromStr;
 
 #[cfg(not(feature = "liquid"))] // use regular Bitcoin data structures
@@ -20,6 +21,7 @@ pub use {
     },
 };
 
+#[cfg(any(not(feature = "litecoin"), feature = "liquid"))]
 use bitcoin::blockdata::constants::genesis_block;
 pub use bitcoin::Network as BNetwork;
 
@@ -66,6 +68,47 @@ pub type Value = u64;
 #[cfg(feature = "liquid")]
 pub use confidential::Value;
 
+#[cfg(all(feature = "litecoin", not(feature = "liquid")))]
+#[derive(Debug)]
+pub struct LtcAddressParams {
+    pub p2pkh_version: u8,
+    pub p2sh_version: u8,
+    pub accepted_p2sh_versions: &'static [u8],
+    pub bech32_hrp: &'static str,
+}
+
+#[cfg(all(feature = "litecoin", not(feature = "liquid")))]
+impl Network {
+    pub fn ltc_address_params(self) -> LtcAddressParams {
+        match self {
+            Network::Bitcoin => LtcAddressParams {
+                p2pkh_version: 0x30, // Base58 "L..."
+                p2sh_version: 0x32,  // Base58 "M..."
+                accepted_p2sh_versions: &[0x32, 0x05],
+                bech32_hrp: "ltc",
+            },
+            Network::Testnet | Network::Testnet4 => LtcAddressParams {
+                p2pkh_version: 0x6f,
+                p2sh_version: 0x3a,
+                accepted_p2sh_versions: &[0x3a, 0xc4],
+                bech32_hrp: "tltc",
+            },
+            Network::Regtest => LtcAddressParams {
+                p2pkh_version: 0x6f,
+                p2sh_version: 0x3a,
+                accepted_p2sh_versions: &[0x3a, 0xc4],
+                bech32_hrp: "rltc",
+            },
+            Network::Signet => LtcAddressParams {
+                p2pkh_version: 0x6f,
+                p2sh_version: 0x3a,
+                accepted_p2sh_versions: &[0x3a, 0xc4],
+                bech32_hrp: "tltc",
+            },
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Serialize, Ord, PartialOrd, Eq)]
 pub enum Network {
     #[cfg(not(feature = "liquid"))]
@@ -97,12 +140,21 @@ pub const LIQUID_TESTNET_PARAMS: address::AddressParams = address::AddressParams
 };
 
 /// Magic for testnet4, 0x1c163f28 (from BIP94) with flipped endianness.
-#[cfg(not(feature = "liquid"))]
+#[cfg(all(not(feature = "liquid"), not(feature = "litecoin")))]
 const TESTNET4_MAGIC: u32 = 0x283f161c;
 
 impl Network {
     #[cfg(not(feature = "liquid"))]
     pub fn magic(self) -> u32 {
+        #[cfg(feature = "litecoin")]
+        return match self {
+            Network::Bitcoin => 0xdbb6c0fb,
+            Network::Testnet => 0xf1c8d2fd,
+            Network::Testnet4 => 0xf1c8d2fd,
+            Network::Regtest => 0xdab5bffa,
+            Network::Signet => 0xdab5bffa,
+        };
+        #[cfg(not(feature = "litecoin"))]
         match self {
             Self::Testnet4 => TESTNET4_MAGIC,
             _ => {
@@ -182,6 +234,30 @@ pub fn genesis_hash(network: Network) -> BlockHash {
     return liquid_genesis_hash(network);
 }
 
+#[cfg(all(feature = "litecoin", not(feature = "liquid")))]
+pub fn bitcoin_genesis_hash(network: Network) -> bitcoin::BlockHash {
+    lazy_static! {
+        static ref LTC_MAINNET_GENESIS: bitcoin::BlockHash =
+            "12a765e31ffd4059bada1e25190f6e98c99d9714d334efa41a195a7e7e04bfe2"
+                .parse()
+                .unwrap();
+        static ref LTC_TESTNET_GENESIS: bitcoin::BlockHash =
+            "4966625a4b2851d9fdee139e56211a0d88575f59ed816ff5e6a63deb4e3e29a0"
+                .parse()
+                .unwrap();
+        static ref LTC_REGTEST_GENESIS: bitcoin::BlockHash =
+            "530827f38f93b43ed12af0b3ad25a288dc02ed74d6d7857862df51fc56c416f9"
+                .parse()
+                .unwrap();
+    }
+    match network {
+        Network::Bitcoin => *LTC_MAINNET_GENESIS,
+        Network::Testnet | Network::Testnet4 => *LTC_TESTNET_GENESIS,
+        Network::Regtest | Network::Signet => *LTC_REGTEST_GENESIS,
+    }
+}
+
+#[cfg(any(not(feature = "litecoin"), feature = "liquid"))]
 pub fn bitcoin_genesis_hash(network: Network) -> bitcoin::BlockHash {
     lazy_static! {
         static ref BITCOIN_GENESIS: bitcoin::BlockHash =
@@ -256,7 +332,7 @@ impl From<&str> for Network {
             #[cfg(feature = "liquid")]
             "liquidregtest" => Network::LiquidRegtest,
 
-            _ => panic!("unsupported Bitcoin network: {:?}", network_name),
+            _ => panic!("unsupported network: {:?}", network_name),
         }
     }
 }
@@ -266,7 +342,10 @@ impl From<Network> for BNetwork {
     fn from(network: Network) -> Self {
         match network {
             Network::Bitcoin => BNetwork::Bitcoin,
+            #[cfg(not(feature = "litecoin"))]
             Network::Testnet => BNetwork::Testnet,
+            #[cfg(feature = "litecoin")]
+            Network::Testnet => BNetwork::Testnet4,
             Network::Testnet4 => BNetwork::Testnet4,
             Network::Regtest => BNetwork::Regtest,
             Network::Signet => BNetwork::Signet,
@@ -279,6 +358,7 @@ impl From<BNetwork> for Network {
     fn from(network: BNetwork) -> Self {
         match network {
             BNetwork::Bitcoin => Network::Bitcoin,
+            #[cfg(not(feature = "litecoin"))]
             BNetwork::Testnet => Network::Testnet,
             BNetwork::Testnet4 => Network::Testnet4,
             BNetwork::Regtest => Network::Regtest,

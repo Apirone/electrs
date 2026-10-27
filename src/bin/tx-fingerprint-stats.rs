@@ -9,10 +9,8 @@ fn main() {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use bitcoin::blockdata::script::ScriptBuf;
-    use bitcoin::consensus::encode::deserialize;
     use electrs::{
-        chain::Transaction,
+        chain::{deserialize, Script, Transaction},
         config::Config,
         daemon::Daemon,
         metrics::Metrics,
@@ -133,7 +131,7 @@ fn main() {
 
         // test for sending back to one of the spent spks
         let has_reuse = {
-            let prev_spks: HashSet<ScriptBuf> = prevouts
+            let prev_spks: HashSet<Script> = prevouts
                 .values()
                 .map(|out| out.script_pubkey.clone())
                 .collect();

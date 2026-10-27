@@ -140,11 +140,24 @@ fn run_server(config: Arc<Config>) -> Result<()> {
             break;
         }
 
-        // Index new blocks
-        let current_tip = daemon.getbestblockhash()?;
-        if current_tip != tip {
-            indexer.update(&daemon)?;
-            tip = current_tip;
+        // Index new blocks (skip if max-index-height limit is already reached)
+        let limit_reached = config.max_index_height.map_or(false, |max_height| {
+            let current_height = indexer.current_height();
+            let at_limit = current_height >= max_height;
+            if at_limit {
+                trace!(
+                    "max-index-height {} reached, skipping block indexing",
+                    max_height
+                );
+            }
+            at_limit
+        });
+        if !limit_reached {
+            let current_tip = daemon.getbestblockhash()?;
+            if current_tip != tip {
+                indexer.update(&daemon)?;
+                tip = current_tip;
+            }
         };
 
         // Update mempool

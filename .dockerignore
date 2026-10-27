@@ -1,1 +1,14 @@
 Dockerfile
+
+.git
+.github
+.idea
+.cursor
+.DS_Store
+
+target
+data
+electrs_data
+
+*.log
+*.tmp

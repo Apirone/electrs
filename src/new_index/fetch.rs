@@ -41,25 +41,27 @@ pub struct BlockEntry {
 }
 
 type SizedBlock = (Block, u32);
+const DEFAULT_BITCOIND_BLOCK_FETCH_BATCH_SIZE: usize = 100;
 
 pub struct SequentialFetcher<T> {
-    fetcher: Box<dyn FnOnce() -> Vec<Vec<T>>>,
+    fetcher: Box<dyn FnOnce() -> Result<Vec<Vec<T>>>>,
 }
 
 impl<T> SequentialFetcher<T> {
-    fn from<F: FnOnce() -> Vec<Vec<T>> + 'static>(pre_func: F) -> Self {
+    fn from<F: FnOnce() -> Result<Vec<Vec<T>>> + 'static>(pre_func: F) -> Self {
         SequentialFetcher {
             fetcher: Box::new(pre_func),
         }
     }
 
-    pub fn map<FN>(self, mut func: FN)
+    pub fn map<FN>(self, mut func: FN) -> Result<()>
     where
         FN: FnMut(Vec<T>),
     {
-        for item in (self.fetcher)() {
+        for item in (self.fetcher)()? {
             func(item);
         }
+        Ok(())
     }
 }
 
@@ -69,48 +71,42 @@ pub fn bitcoind_sequential_fetcher(
 ) -> Result<SequentialFetcher<BlockEntry>> {
     let daemon = daemon.reconnect()?;
     Ok(SequentialFetcher::from(move || {
-        new_headers
-            .chunks(100)
-            .map(|entries| {
-                let blockhashes: Vec<BlockHash> = entries.iter().map(|e| *e.hash()).collect();
-                let blocks = daemon
-                    .getblocks(&blockhashes)
-                    .expect("failed to get blocks from bitcoind");
-                assert_eq!(blocks.len(), entries.len());
-                let block_entries: Vec<BlockEntry> = blocks
-                    .into_iter()
-                    .zip(entries)
-                    .map(|(block, entry)| BlockEntry {
-                        entry: entry.clone(), // TODO: remove this clone()
-                        size: block.get_block_size() as u32,
-                        block,
-                    })
-                    .collect();
-                assert_eq!(block_entries.len(), entries.len());
-                block_entries
-            })
-            .collect()
+        let mut block_entries = Vec::new();
+        for entries in new_headers.chunks(DEFAULT_BITCOIND_BLOCK_FETCH_BATCH_SIZE) {
+            block_entries.push(fetch_block_entries(&daemon, entries)?);
+        }
+        Ok(block_entries)
     }))
 }
 
 pub struct Fetcher<T> {
-    receiver: crossbeam_channel::Receiver<T>,
+    receiver: crossbeam_channel::Receiver<Result<T>>,
     thread: thread::JoinHandle<()>,
 }
 
 impl<T> Fetcher<T> {
-    fn from(receiver: crossbeam_channel::Receiver<T>, thread: thread::JoinHandle<()>) -> Self {
+    fn from(
+        receiver: crossbeam_channel::Receiver<Result<T>>,
+        thread: thread::JoinHandle<()>,
+    ) -> Self {
         Fetcher { receiver, thread }
     }
 
-    pub fn map<F>(self, mut func: F)
+    pub fn map<F>(self, mut func: F) -> Result<()>
     where
         F: FnMut(T),
     {
         for item in self.receiver {
-            func(item);
+            match item {
+                Ok(item) => func(item),
+                Err(err) => {
+                    self.thread.join().expect("fetcher thread panicked");
+                    return Err(err);
+                }
+            }
         }
-        self.thread.join().expect("fetcher thread panicked")
+        self.thread.join().expect("fetcher thread panicked");
+        Ok(())
     }
 }
 
@@ -127,28 +123,31 @@ fn bitcoind_fetcher(
     Ok(Fetcher::from(
         chan.into_receiver(),
         spawn_thread("bitcoind_fetcher", move || {
-            for entries in new_headers.chunks(100) {
-                let blockhashes: Vec<BlockHash> = entries.iter().map(|e| *e.hash()).collect();
-                let blocks = daemon
-                    .getblocks(&blockhashes)
-                    .expect("failed to get blocks from bitcoind");
-                assert_eq!(blocks.len(), entries.len());
-                let block_entries: Vec<BlockEntry> = blocks
-                    .into_iter()
-                    .zip(entries)
-                    .map(|(block, entry)| BlockEntry {
-                        entry: entry.clone(), // TODO: remove this clone()
-                        size: block.get_block_size() as u32,
-                        block,
-                    })
-                    .collect();
-                assert_eq!(block_entries.len(), entries.len());
-                sender
-                    .send(block_entries)
-                    .expect("failed to send fetched blocks");
+            for entries in new_headers.chunks(DEFAULT_BITCOIND_BLOCK_FETCH_BATCH_SIZE) {
+                let result = fetch_block_entries(&daemon, entries);
+                let failed = result.is_err();
+                sender.send(result).expect("failed to send fetched blocks");
+                if failed {
+                    return;
+                }
             }
         }),
     ))
+}
+
+fn fetch_block_entries(daemon: &Daemon, entries: &[HeaderEntry]) -> Result<Vec<BlockEntry>> {
+    let blockhashes: Vec<BlockHash> = entries.iter().map(|e| *e.hash()).collect();
+    let blocks = daemon.getblocks(&blockhashes)?;
+    assert_eq!(blocks.len(), entries.len());
+    Ok(blocks
+        .into_iter()
+        .zip(entries)
+        .map(|(block, entry)| BlockEntry {
+            entry: entry.clone(), // TODO: remove this clone()
+            size: block.get_block_size() as u32,
+            block,
+        })
+        .collect())
 }
 
 fn blkfiles_fetcher(
@@ -168,7 +167,7 @@ fn blkfiles_fetcher(
     Ok(Fetcher::from(
         chan.into_receiver(),
         spawn_thread("blkfiles_fetcher", move || {
-            parser.map(|sizedblocks| {
+            let result = parser.map(|sizedblocks| {
                 let block_entries: Vec<BlockEntry> = sizedblocks
                     .into_iter()
                     .filter_map(|(block, size)| {
@@ -184,9 +183,14 @@ fn blkfiles_fetcher(
                     .collect();
                 trace!("fetched {} blocks", block_entries.len());
                 sender
-                    .send(block_entries)
+                    .send(Ok(block_entries))
                     .expect("failed to send blocks entries from blk*.dat files");
             });
+            if let Err(err) = result {
+                sender
+                    .send(Err(err))
+                    .expect("failed to send blk*.dat parser error");
+            }
             if !entry_map.is_empty() {
                 panic!(
                     "failed to index {} blocks from blk*.dat files",
@@ -228,7 +232,7 @@ fn blkfiles_reader(blk_files: Vec<PathBuf>) -> Fetcher<Vec<u8>> {
                 }
 
                 sender
-                    .send(blob)
+                    .send(Ok(blob))
                     .unwrap_or_else(|_| panic!("failed to send {:?} contents", path));
             }
         }),
@@ -242,13 +246,18 @@ fn blkfiles_parser(blobs: Fetcher<Vec<u8>>, magic: u32) -> Fetcher<Vec<SizedBloc
     Fetcher::from(
         chan.into_receiver(),
         spawn_thread("blkfiles_parser", move || {
-            blobs.map(|blob| {
+            let result = blobs.map(|blob| {
                 trace!("parsing {} bytes", blob.len());
                 let blocks = parse_blocks(blob, magic).expect("failed to parse blk*.dat file");
                 sender
-                    .send(blocks)
+                    .send(Ok(blocks))
                     .expect("failed to send blocks from blk*.dat file");
             });
+            if let Err(err) = result {
+                sender
+                    .send(Err(err))
+                    .expect("failed to send blk*.dat reader error");
+            }
         }),
     )
 }

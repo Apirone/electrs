@@ -17,6 +17,9 @@ $ git clone https://github.com/mempool/electrs && cd electrs
 $ git checkout mempool
 $ cargo run --release --bin electrs -- -vvvv --daemon-dir ~/.bitcoin
 
+# Or for Litecoin (requires Litecoin Core):
+$ cargo run --features litecoin --release --bin electrs -- -vvvv --daemon-dir ~/.litecoin
+
 # Or for liquid:
 $ cargo run --features liquid --release --bin electrs -- -vvvv --network liquid --daemon-dir ~/.liquid
 ```
@@ -68,6 +71,8 @@ In addition to electrs's original configuration options, a few new options are a
 - `--utxos-limit <num>` - maximum number of utxos to return per address.
 - `--electrum-txs-limit <num>` - maximum number of txs to return per address in the electrum server (does not apply for the http api).
 - `--electrum-banner <text>` - welcome banner text for electrum server.
+- `--max-index-height <height>` - index blocks only through this height (inclusive). For testing on small portions of the chain only; the resulting index is incomplete. Unset by default.
+- `--rocksdb-compression <none|lz4|zstd>` - compression algorithm for newly written RocksDB SST files (default: `none`).
 
 Additional options with the `liquid` feature:
 - `--parent-network <network>` - the parent network this chain is pegged to.

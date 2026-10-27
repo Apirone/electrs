@@ -30,6 +30,36 @@ lazy_static! {
     };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RocksDbCompression {
+    None,
+    Lz4,
+    Zstd,
+}
+
+impl From<&str> for RocksDbCompression {
+    fn from(value: &str) -> Self {
+        match value {
+            "none" => RocksDbCompression::None,
+            "lz4" => RocksDbCompression::Lz4,
+            "zstd" => RocksDbCompression::Zstd,
+            _ => panic!("unsupported RocksDB compression: {:?}", value),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RocksDbCompression;
+
+    #[test]
+    fn test_rocksdb_compression_from_str() {
+        assert_eq!(RocksDbCompression::from("none"), RocksDbCompression::None);
+        assert_eq!(RocksDbCompression::from("lz4"), RocksDbCompression::Lz4);
+        assert_eq!(RocksDbCompression::from("zstd"), RocksDbCompression::Zstd);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     // See below for the documentation of each field:
@@ -69,6 +99,8 @@ pub struct Config {
     pub electrum_max_subscriptions: usize,
     pub electrum_max_clients: usize,
     pub electrum_idle_timeout: u64,
+    pub max_index_height: Option<usize>,
+    pub rocksdb_compression: RocksDbCompression,
 
     #[cfg(feature = "liquid")]
     pub parent_network: BNetwork,
@@ -302,6 +334,18 @@ impl Config {
                     .long("electrum-idle-timeout")
                     .help("Maximum idle time in seconds since the last client request before disconnecting the Electrum connection.")
                     .default_value("600")
+            ).arg(
+                Arg::with_name("max_index_height")
+                    .long("max-index-height")
+                    .help("Stop indexing at this block height (inclusive). Useful for testing. The service remains fully operational for indexed data and mempool.")
+                    .takes_value(true)
+            ).arg(
+                Arg::with_name("rocksdb_compression")
+                    .long("rocksdb-compression")
+                    .help("Compression algorithm for newly written RocksDB SST files.")
+                    .takes_value(true)
+                    .possible_values(&["none", "lz4", "zstd"])
+                    .default_value("none")
             );
 
         #[cfg(unix)]
@@ -382,14 +426,22 @@ impl Config {
         let asset_db_path = m.value_of("asset_db_path").map(PathBuf::from);
 
         let default_daemon_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
+            #[cfg(all(not(feature = "liquid"), not(feature = "litecoin")))]
             Network::Bitcoin => 8332,
-            #[cfg(not(feature = "liquid"))]
+            #[cfg(all(not(feature = "liquid"), feature = "litecoin"))]
+            Network::Bitcoin => 9332,
+            #[cfg(all(not(feature = "liquid"), not(feature = "litecoin")))]
             Network::Testnet => 18332,
-            #[cfg(not(feature = "liquid"))]
+            #[cfg(all(not(feature = "liquid"), feature = "litecoin"))]
+            Network::Testnet => 19332,
+            #[cfg(all(not(feature = "liquid"), not(feature = "litecoin")))]
             Network::Regtest => 18443,
-            #[cfg(not(feature = "liquid"))]
+            #[cfg(all(not(feature = "liquid"), feature = "litecoin"))]
+            Network::Regtest => 19443,
+            #[cfg(all(not(feature = "liquid"), not(feature = "litecoin")))]
             Network::Signet => 38332,
+            #[cfg(all(not(feature = "liquid"), feature = "litecoin"))]
+            Network::Signet => 39332,
             #[cfg(not(feature = "liquid"))]
             Network::Testnet4 => 48332,
 
@@ -485,14 +537,19 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let mut default_dir = home_dir().expect("no homedir");
+                #[cfg(feature = "litecoin")]
+                default_dir.push(".litecoin");
+                #[cfg(not(feature = "litecoin"))]
                 default_dir.push(".bitcoin");
                 default_dir
             });
         match network_type {
             #[cfg(not(feature = "liquid"))]
             Network::Bitcoin => (),
-            #[cfg(not(feature = "liquid"))]
+            #[cfg(all(not(feature = "liquid"), not(feature = "litecoin")))]
             Network::Testnet => daemon_dir.push("testnet3"),
+            #[cfg(all(not(feature = "liquid"), feature = "litecoin"))]
+            Network::Testnet => daemon_dir.push("testnet4"),
             #[cfg(not(feature = "liquid"))]
             Network::Testnet4 => daemon_dir.push("testnet4"),
             #[cfg(not(feature = "liquid"))]
@@ -513,9 +570,15 @@ impl Config {
             .unwrap_or_else(|| daemon_dir.join("blocks"));
         let cookie = m.value_of("cookie").map(|s| s.to_owned());
 
-        let electrum_banner = m
-            .value_of("electrum_banner")
-            .map_or_else(|| format!("Welcome to {}", *VERSION_STRING), |s| s.into());
+        let electrum_banner = m.value_of("electrum_banner").map_or_else(
+            || {
+                #[cfg(feature = "litecoin")]
+                return format!("Welcome to litecoin-electrs {}", *VERSION_STRING);
+                #[cfg(not(feature = "litecoin"))]
+                return format!("Welcome to {}", *VERSION_STRING);
+            },
+            |s| s.into(),
+        );
 
         #[cfg(feature = "electrum-discovery")]
         let electrum_public_hosts = m
@@ -575,6 +638,13 @@ impl Config {
             electrum_max_subscriptions: value_t_or_exit!(m, "electrum_max_subscriptions", usize),
             electrum_max_clients: value_t_or_exit!(m, "electrum_max_clients", usize),
             electrum_idle_timeout: value_t_or_exit!(m, "electrum_idle_timeout", u64),
+            max_index_height: m.value_of("max_index_height").map(|s| {
+                s.parse::<usize>()
+                    .expect("invalid --max-index-height value")
+            }),
+            rocksdb_compression: RocksDbCompression::from(
+                m.value_of("rocksdb_compression").unwrap(),
+            ),
             jsonrpc_import: m.is_present("jsonrpc_import"),
             light_mode: m.is_present("light_mode"),
             main_loop_delay: value_t_or_exit!(m, "main_loop_delay", u64),

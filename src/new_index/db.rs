@@ -2,7 +2,7 @@ use rocksdb;
 
 use std::path::Path;
 
-use crate::config::Config;
+use crate::config::{Config, RocksDbCompression};
 use crate::util::{bincode_util, Bytes};
 
 /// Each version will break any running instance with a DB that has a differing version.
@@ -148,7 +148,7 @@ pub enum DBFlush {
 impl DB {
     pub fn open(path: &Path, config: &Config) -> DB {
         let db = DB {
-            db: open_raw_db(path, OpenMode::ReadWrite),
+            db: open_raw_db_with_compression(path, OpenMode::ReadWrite, config.rocksdb_compression),
         };
         db.verify_compatibility(config);
         db
@@ -301,12 +301,24 @@ pub fn open_raw_db<T: rocksdb::ThreadMode>(
     path: &Path,
     read_mode: OpenMode,
 ) -> rocksdb::DBWithThreadMode<T> {
+    open_raw_db_with_compression(path, read_mode, RocksDbCompression::None)
+}
+
+pub fn open_raw_db_with_compression<T: rocksdb::ThreadMode>(
+    path: &Path,
+    read_mode: OpenMode,
+    compression: RocksDbCompression,
+) -> rocksdb::DBWithThreadMode<T> {
     debug!("opening DB at {:?}", path);
     let mut db_opts = rocksdb::Options::default();
     db_opts.create_if_missing(true);
     db_opts.set_max_open_files(100_000); // TODO: make sure to `ulimit -n` this process correctly
     db_opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
-    db_opts.set_compression_type(rocksdb::DBCompressionType::None);
+    db_opts.set_compression_type(match compression {
+        RocksDbCompression::None => rocksdb::DBCompressionType::None,
+        RocksDbCompression::Lz4 => rocksdb::DBCompressionType::Lz4,
+        RocksDbCompression::Zstd => rocksdb::DBCompressionType::Zstd,
+    });
     db_opts.set_target_file_size_base(1_073_741_824);
     db_opts.set_write_buffer_size(256 << 20);
     db_opts.set_disable_auto_compactions(true); // for initial bulk load

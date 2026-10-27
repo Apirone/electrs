@@ -107,10 +107,41 @@ pub trait ScriptToAddr {
 #[cfg(not(feature = "liquid"))]
 impl ScriptToAddr for bitcoin::Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
+        #[cfg(feature = "litecoin")]
+        return ltc_script_to_address(self, network);
+
+        #[cfg(not(feature = "litecoin"))]
         bitcoin::Address::from_script(self, bitcoin::Network::from(network))
             .ok()
             .map(|s| s.to_string())
     }
+}
+
+#[cfg(all(not(feature = "liquid"), feature = "litecoin"))]
+fn ltc_script_to_address(script: &bitcoin::Script, network: Network) -> Option<String> {
+    let params = network.ltc_address_params();
+    let bytes = script.as_bytes();
+
+    // P2PKH: OP_DUP OP_HASH160 <20-bytes> OP_EQUALVERIFY OP_CHECKSIG
+    if script.is_p2pkh() {
+        let mut payload = vec![params.p2pkh_version];
+        payload.extend_from_slice(&bytes[3..23]);
+        return Some(bitcoin::base58::encode_check(&payload));
+    }
+    // P2SH: OP_HASH160 <20-bytes> OP_EQUAL
+    if script.is_p2sh() {
+        let mut payload = vec![params.p2sh_version];
+        payload.extend_from_slice(&bytes[2..22]);
+        return Some(bitcoin::base58::encode_check(&payload));
+    }
+    // Segwit witness program (P2WPKH, P2WSH, P2TR)
+    if script.is_witness_program() {
+        let hrp = bech32::Hrp::parse(params.bech32_hrp).ok()?;
+        let version = script.witness_version()?.to_fe();
+        let program = &bytes[2..];
+        return bech32::segwit::encode(hrp, version, program).ok();
+    }
+    None
 }
 #[cfg(feature = "liquid")]
 impl ScriptToAddr for elements::Script {

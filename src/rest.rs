@@ -2023,6 +2023,12 @@ fn to_scripthash(
     }
 }
 
+#[cfg(all(feature = "litecoin", not(feature = "liquid")))]
+fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
+    ltc_address_to_scripthash(addr, network)
+}
+
+#[cfg(any(not(feature = "litecoin"), feature = "liquid"))]
 fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
     #[cfg(not(feature = "liquid"))]
     let addr = {
@@ -2059,6 +2065,61 @@ fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpE
     };
 
     Ok(compute_script_hash(&addr.script_pubkey()))
+}
+
+#[cfg(all(feature = "litecoin", not(feature = "liquid")))]
+fn ltc_address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
+    let params = network.ltc_address_params();
+
+    // Bech32 segwit (ltc1..., tltc1..., rltc1...)
+    if addr.to_lowercase().starts_with(params.bech32_hrp) {
+        let hrp =
+            bech32::Hrp::parse(params.bech32_hrp).map_err(|e| HttpError::from(e.to_string()))?;
+        let (decoded_hrp, version, program) = bech32::segwit::decode(addr)
+            .map_err(|_| HttpError::from("Invalid bech32 address".to_string()))?;
+        if decoded_hrp != hrp {
+            return Err(HttpError::from("Address on invalid network".to_string()));
+        }
+        let script = match (version.to_u8(), program.len()) {
+            (0, 20) => bitcoin::ScriptBuf::new_p2wpkh(
+                &bitcoin::WPubkeyHash::from_slice(&program)
+                    .map_err(|e| HttpError::from(e.to_string()))?,
+            ),
+            (0, 32) => bitcoin::ScriptBuf::new_p2wsh(
+                &bitcoin::WScriptHash::from_slice(&program)
+                    .map_err(|e| HttpError::from(e.to_string()))?,
+            ),
+            (1, 32) => {
+                let xonly = bitcoin::key::XOnlyPublicKey::from_slice(&program)
+                    .map_err(|e| HttpError::from(e.to_string()))?;
+                bitcoin::ScriptBuf::new_p2tr_tweaked(
+                    bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(xonly),
+                )
+            }
+            _ => return Err(HttpError::from("Unsupported witness program".to_string())),
+        };
+        return Ok(compute_script_hash(&script));
+    }
+
+    // Base58Check legacy (P2PKH / P2SH)
+    let payload = bitcoin::base58::decode_check(addr)
+        .map_err(|_| HttpError::from("Invalid address".to_string()))?;
+    if payload.len() != 21 {
+        return Err(HttpError::from("Invalid address payload".to_string()));
+    }
+    let (version, hash) = (payload[0], &payload[1..21]);
+    let script = if version == params.p2pkh_version {
+        bitcoin::ScriptBuf::new_p2pkh(
+            &bitcoin::PubkeyHash::from_slice(hash).map_err(|e| HttpError::from(e.to_string()))?,
+        )
+    } else if params.accepted_p2sh_versions.contains(&version) {
+        bitcoin::ScriptBuf::new_p2sh(
+            &bitcoin::ScriptHash::from_slice(hash).map_err(|e| HttpError::from(e.to_string()))?,
+        )
+    } else {
+        return Err(HttpError::from("Address on invalid network".to_string()));
+    };
+    Ok(compute_script_hash(&script))
 }
 
 fn parse_scripthash(scripthash: &str) -> Result<FullHash, HttpError> {
@@ -2217,6 +2278,30 @@ mod tests {
             .ok_or(HttpError::from("notexist absent or not a u64".to_string()));
 
         assert!(err.is_err());
+    }
+
+    #[cfg(all(feature = "litecoin", not(feature = "liquid")))]
+    #[test]
+    fn test_litecoin_testnet_p2sh_prefixes_resolve_to_same_scripthash() {
+        let hash = [1u8; 20];
+        let modern = bitcoin::base58::encode_check(&[&[0x3a], &hash[..]].concat());
+        let legacy = bitcoin::base58::encode_check(&[&[0xc4], &hash[..]].concat());
+
+        let modern_scripthash =
+            super::ltc_address_to_scripthash(&modern, crate::chain::Network::Testnet).unwrap();
+        let legacy_scripthash =
+            super::ltc_address_to_scripthash(&legacy, crate::chain::Network::Testnet).unwrap();
+
+        assert_eq!(modern_scripthash, legacy_scripthash);
+    }
+
+    #[cfg(all(feature = "litecoin", not(feature = "liquid")))]
+    #[test]
+    fn test_litecoin_base58_address_payload_must_be_exact_length() {
+        let too_long_payload = [&[0x6f], &[2u8; 21][..]].concat();
+        let addr = bitcoin::base58::encode_check(&too_long_payload);
+
+        assert!(super::ltc_address_to_scripthash(&addr, crate::chain::Network::Testnet).is_err());
     }
 
     #[test]

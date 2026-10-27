@@ -185,6 +185,7 @@ struct IndexerConfig {
     address_search: bool,
     index_unspendables: bool,
     network: Network,
+    max_index_height: Option<usize>,
     #[cfg(feature = "liquid")]
     parent_network: crate::chain::BNetwork,
 }
@@ -196,6 +197,7 @@ impl From<&Config> for IndexerConfig {
             address_search: config.address_search,
             index_unspendables: config.index_unspendables,
             network: config.network_type,
+            max_index_height: config.max_index_height,
             #[cfg(feature = "liquid")]
             parent_network: config.parent_network,
         }
@@ -242,6 +244,12 @@ impl Indexer {
         }
     }
 
+    /// Returns the height of the last indexed block (0 if nothing indexed yet).
+    pub fn current_height(&self) -> usize {
+        let headers = self.store.indexed_headers.read().unwrap();
+        headers.len().saturating_sub(1)
+    }
+
     fn start_timer(&self, name: &str) -> HistogramTimer {
         self.duration.with_label_values(&[name]).start_timer()
     }
@@ -276,8 +284,12 @@ impl Indexer {
 
     fn get_new_headers(&self, daemon: &Daemon, tip: &BlockHash) -> Result<Vec<HeaderEntry>> {
         let headers = self.store.indexed_headers.read().unwrap();
-        let new_headers = daemon.get_new_headers(&headers, tip)?;
-        let result = headers.order(new_headers);
+        let new_headers = daemon.get_new_headers(&headers, tip, self.iconfig.max_index_height)?;
+        let mut result = headers.order(new_headers);
+
+        if let Some(max_height) = self.iconfig.max_index_height {
+            result.retain(|e| e.height() <= max_height);
+        }
 
         if let Some(tip) = result.last() {
             info!("{:?} ({} left to index)", tip, result.len());
@@ -297,10 +309,10 @@ impl Indexer {
         let (tx, rx) = crossbeam_channel::unbounded();
         // Delete history_db
         bitcoind_sequential_fetcher(daemon, reorged.clone())?
-            .map(|blocks| self.index(&blocks, Operation::DeleteBlocksWithHistory(tx.clone())));
+            .map(|blocks| self.index(&blocks, Operation::DeleteBlocksWithHistory(tx.clone())))?;
         // Delete txstore
         bitcoind_sequential_fetcher(daemon, reorged)?
-            .map(|blocks| self.add(&blocks, Operation::DeleteBlocks));
+            .map(|blocks| self.add(&blocks, Operation::DeleteBlocks))?;
         // All senders must be dropped for receiver iterator to finish
         drop(tx);
 
@@ -321,14 +333,32 @@ impl Indexer {
 
     pub fn update(&mut self, daemon: &Daemon) -> Result<BlockHash> {
         let daemon = daemon.reconnect()?;
-        let tip = daemon.getbestblockhash()?;
-        let new_headers = self.get_new_headers(&daemon, &tip)?;
+        let daemon_tip = daemon.getbestblockhash()?;
+        let update_tip = match self.iconfig.max_index_height {
+            Some(max_height) => {
+                let daemon_tip_height = daemon
+                    .getblockheight(&daemon_tip)
+                    .chain_err(|| format!("failed to get daemon tip {} height", daemon_tip))?;
+                if daemon_tip_height > max_height {
+                    daemon.getblockhash(max_height).chain_err(|| {
+                        format!("failed to get block hash at height {}", max_height)
+                    })?
+                } else {
+                    daemon_tip
+                }
+            }
+            None => daemon_tip,
+        };
+        let new_headers = self.get_new_headers(&daemon, &update_tip)?;
 
         // Must rollback blocks before rolling forward
-        let headers_len = {
+        let (headers_len, indexed_tip) = {
             let mut headers = self.store.indexed_headers.write().unwrap();
             let (reorged, rollback_tip) = headers.apply(new_headers.clone());
-            assert_eq!(tip, *headers.tip());
+            let indexed_tip = *headers.tip();
+            if self.iconfig.max_index_height.is_none() {
+                assert_eq!(update_tip, indexed_tip);
+            }
             let headers_len = headers.len();
             drop(headers);
 
@@ -351,7 +381,7 @@ impl Indexer {
                 self.reorg(reorged, &daemon)?;
             }
 
-            headers_len
+            (headers_len, indexed_tip)
         };
 
         let to_add = self.headers_to_add(&new_headers);
@@ -361,7 +391,7 @@ impl Indexer {
             self.from
         );
         start_fetcher(self.from, &daemon, to_add)?
-            .map(|blocks| self.add(&blocks, Operation::AddBlocks));
+            .map(|blocks| self.add(&blocks, Operation::AddBlocks))?;
         self.start_auto_compactions(&self.store.txstore_db);
 
         let to_index = self.headers_to_index(&new_headers);
@@ -371,7 +401,7 @@ impl Indexer {
             self.from
         );
         start_fetcher(self.from, &daemon, to_index)?
-            .map(|blocks| self.index(&blocks, Operation::AddBlocks));
+            .map(|blocks| self.index(&blocks, Operation::AddBlocks))?;
         self.start_auto_compactions(&self.store.history_db);
 
         if let DBFlush::Disable = self.flush {
@@ -382,8 +412,10 @@ impl Indexer {
         }
 
         // update the synced tip *after* the new data is flushed to disk
-        debug!("updating synced tip to {:?}", tip);
-        self.store.txstore_db.put_sync(b"t", &serialize(&tip));
+        debug!("updating synced tip to {:?}", indexed_tip);
+        self.store
+            .txstore_db
+            .put_sync(b"t", &serialize(&indexed_tip));
 
         if let FetchFrom::BlkFiles = self.from {
             self.from = FetchFrom::Bitcoind;
@@ -391,7 +423,7 @@ impl Indexer {
 
         self.tip_metric.set(headers_len as i64 - 1);
 
-        Ok(tip)
+        Ok(indexed_tip)
     }
 
     fn add(&self, blocks: &[BlockEntry], op: Operation) {
