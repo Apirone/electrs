@@ -345,7 +345,7 @@ impl Config {
                     .help("Compression algorithm for newly written RocksDB SST files.")
                     .takes_value(true)
                     .possible_values(&["none", "lz4", "zstd"])
-                    .default_value("none")
+                    .default_value("zstd")
             );
 
         #[cfg(unix)]
