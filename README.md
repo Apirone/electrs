@@ -31,6 +31,20 @@ The indexes require 1.3TB of storage after running compaction (as of October 202
 free space of about double that available during the index compaction process.
 Creating the indexes should take a few hours on a beefy machine with high speed NVMe SSD(s).
 
+### Docker builds
+
+The same Dockerfile builds either Bitcoin or Litecoin electrs. The coin is selected at build time
+with a Cargo feature, so build a separate image for each coin:
+
+```bash
+docker build -t electrs:bitcoin .
+docker build --build-arg CARGO_EXTRA_ARGS="--features litecoin" -t electrs:litecoin .
+```
+
+Run the appropriate image with the RPC connection, authentication, data volumes, and network
+settings for its node. The runtime `--network` option selects mainnet, testnet, or another network
+within the coin chosen at build time; it does not switch a Bitcoin image to Litecoin.
+
 ### Light mode
 
 For personal or low-volume use, you may set `--lightmode` to reduce disk storage requirements
